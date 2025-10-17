@@ -1,0 +1,20 @@
+[package]
+name = "vectai_oracle"
+version = "0.1.0"
+description = "VECT.AI Lightweight Pyth Oracle Reader"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vectai_oracle"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+pyth-solana-receiver-sdk = { workspace = true }

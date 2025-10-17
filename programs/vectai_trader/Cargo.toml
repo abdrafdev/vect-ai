@@ -1,0 +1,22 @@
+[package]
+name = "vectai_trader"
+version = "0.1.0"
+description = "VECT.AI Simple Trader with Jupiter Integration"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vectai_trader"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+spl-token = { workspace = true }
+vectai_oracle = { path = "../vectai_oracle", features = ["cpi"] }
