@@ -1,8 +1,9 @@
 [package]
 name = "vectai_trader"
 version = "0.1.0"
-description = "VECT.AI Simple Trader with Jupiter Integration"
+description = "VECT.AI Trader with Jupiter Aggregator Integration"
 edition = "2021"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -16,7 +17,24 @@ cpi = ["no-entrypoint"]
 default = []
 
 [dependencies]
+# Anchor Core
 anchor-lang = { workspace = true }
 anchor-spl = { workspace = true }
+
+# Token + System Program
 spl-token = { workspace = true }
+solana-program = "1.18.10"
+
+# Oracle CPI integration
 vectai_oracle = { path = "../vectai_oracle", features = ["cpi"] }
+
+# Jupiter Aggregator Interface (for on-chain swaps)
+# Note: Real Jupiter CPI integration would require their SDK
+# Currently using simulated swap logic
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+anchor-client = { version = "0.29.0" }

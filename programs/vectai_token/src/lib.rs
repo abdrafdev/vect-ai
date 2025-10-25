@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo, Transfer};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("DfpsT9PAeWbwwfE8EqTDqVUiCrsoHF1fogmPw42eqLPH");
 
@@ -7,48 +7,47 @@ declare_id!("DfpsT9PAeWbwwfE8EqTDqVUiCrsoHF1fogmPw42eqLPH");
 pub mod vectai_token {
     use super::*;
 
-    /// Initialize the VECTAI token mint with authority and supply
-    pub fn initialize(
-        ctx: Context<Initialize>, 
+    /// Initialize token with supply cap and authority
+    pub fn initialize_token(
+        ctx: Context<InitializeToken>,
+        max_supply: u64,
         decimals: u8,
-        total_supply: u64
     ) -> Result<()> {
         let token_info = &mut ctx.accounts.token_info;
         
-        // Store token metadata
-        token_info.authority = ctx.accounts.mint_authority.key();
+        // Initialize token metadata
+        token_info.mint_authority = ctx.accounts.mint_authority.key();
         token_info.mint = ctx.accounts.mint.key();
-        token_info.total_supply = total_supply;
+        token_info.max_supply = max_supply;
         token_info.minted = 0;
         token_info.decimals = decimals;
+        token_info.is_paused = false;
         
-        msg!("VECTAI token initialized: {} decimals, {} total supply", 
-             decimals, total_supply);
+        msg!("VECTAI token initialized: {} max supply, {} decimals", max_supply, decimals);
         Ok(())
     }
 
-    /// Mint tokens to a specified account (only mint authority)
-    pub fn mint_to(ctx: Context<MintTo>, amount: u64) -> Result<()> {
-        let token_info = &mut ctx.accounts.token_info;
-        
-        // Check: Validate inputs and mint authority
+    /// Secure mint tokens with authorization and supply checks
+    pub fn mint_to(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
+        // ✅ CHECKS: Validate inputs and authorization
         require!(amount > 0, TokenError::InvalidAmount);
+        require!(!ctx.accounts.token_info.is_paused, TokenError::TokenPaused);
         require!(
-            ctx.accounts.mint_authority.key() == token_info.authority,
-            TokenError::InvalidMintAuthority
+            ctx.accounts.mint_authority.key() == ctx.accounts.token_info.mint_authority,
+            TokenError::UnauthorizedMintAuthority
         );
         
-        // Check: Do not exceed total supply (track minted)
-        let new_total = token_info
+        // Check supply cap
+        let new_total = ctx.accounts.token_info
             .minted
             .checked_add(amount)
-            .ok_or(TokenError::InsufficientSupply)?;
-        require!(new_total <= token_info.total_supply, TokenError::InsufficientSupply);
+            .ok_or(TokenError::MathOverflow)?;
+        require!(new_total <= ctx.accounts.token_info.max_supply, TokenError::ExceedsMaxSupply);
         
-        // Effects: Update state before external call (CEI; tx reverts on CPI failure)
-        token_info.minted = new_total;
+        // ✅ EFFECTS: Update state before external call (CEI pattern)
+        ctx.accounts.token_info.minted = new_total;
         
-        // Interactions: Call SPL token program
+        // ✅ INTERACTIONS: Execute CPI after state update
         let cpi_accounts = anchor_spl::token::MintTo {
             mint: ctx.accounts.mint.to_account_info(),
             to: ctx.accounts.to.to_account_info(),
@@ -59,16 +58,24 @@ pub mod vectai_token {
         
         token::mint_to(cpi_ctx, amount)?;
         
-        msg!("Minted {} VECTAI tokens", amount);
+        msg!("✅ Minted {} VECTAI tokens (Total minted: {})", amount, new_total);
         Ok(())
     }
 
-    /// Transfer tokens between accounts
+    /// Secure transfer tokens with ownership validation
     pub fn transfer(ctx: Context<TransferTokens>, amount: u64) -> Result<()> {
-        // Check: Basic validation (SPL token program handles most checks)
+        // ✅ CHECKS: Validate inputs and ownership
         require!(amount > 0, TokenError::InvalidAmount);
+        require!(
+            ctx.accounts.from.owner == ctx.accounts.authority.key(),
+            TokenError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.from.amount >= amount,
+            TokenError::InsufficientBalance
+        );
         
-        // Interactions: Call SPL token program (follows CEI pattern)
+        // ✅ INTERACTIONS: Execute transfer (no state changes needed)
         let cpi_accounts = Transfer {
             from: ctx.accounts.from.to_account_info(),
             to: ctx.accounts.to.to_account_info(), 
@@ -79,14 +86,42 @@ pub mod vectai_token {
         
         token::transfer(cpi_ctx, amount)?;
         
-        msg!("Transferred {} VECTAI tokens", amount);
+        msg!("✅ Transferred {} VECTAI tokens from {} to {}", 
+             amount, ctx.accounts.from.key(), ctx.accounts.to.key());
+        Ok(())
+    }
+
+    /// Emergency pause function (admin only)
+    pub fn pause_token(ctx: Context<PauseToken>) -> Result<()> {
+        require!(
+            ctx.accounts.admin.key() == ADMIN_AUTHORITY,
+            TokenError::UnauthorizedAdmin
+        );
+        
+        ctx.accounts.token_info.is_paused = true;
+        msg!("🚨 VECTAI token paused by admin");
+        Ok(())
+    }
+
+    /// Unpause token (admin only)
+    pub fn unpause_token(ctx: Context<PauseToken>) -> Result<()> {
+        require!(
+            ctx.accounts.admin.key() == ADMIN_AUTHORITY,
+            TokenError::UnauthorizedAdmin
+        );
+        
+        ctx.accounts.token_info.is_paused = false;
+        msg!("✅ VECTAI token unpaused by admin");
         Ok(())
     }
 }
 
+// Constants
+const ADMIN_AUTHORITY: Pubkey = anchor_lang::solana_program::pubkey!("11111111111111111111111111111111"); // Replace with actual admin
+
 #[derive(Accounts)]
-#[instruction(decimals: u8)]
-pub struct Initialize<'info> {
+#[instruction(max_supply: u64, decimals: u8)]
+pub struct InitializeToken<'info> {
     #[account(
         init,
         payer = payer,
@@ -104,7 +139,6 @@ pub struct Initialize<'info> {
     )]
     pub token_info: Account<'info, TokenInfo>,
     
-    /// CHECK: This is the mint authority and will be validated
     pub mint_authority: Signer<'info>,
     
     #[account(mut)]
@@ -116,7 +150,7 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
-pub struct MintTo<'info> {
+pub struct MintTokens<'info> {
     #[account(mut)]
     pub mint: Account<'info, Mint>,
     
@@ -145,30 +179,54 @@ pub struct TransferTokens<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct PauseToken<'info> {
+    #[account(
+        mut,
+        seeds = [b"token-info", token_info.mint.as_ref()],
+        bump
+    )]
+    pub token_info: Account<'info, TokenInfo>,
+    
+    pub admin: Signer<'info>,
+}
+
 #[account]
 pub struct TokenInfo {
-    pub authority: Pubkey,   // Mint authority
-    pub mint: Pubkey,        // Mint account
-    pub total_supply: u64,   // Maximum supply cap
-    pub minted: u64,         // Amount minted so far
-    pub decimals: u8,        // Token decimals
+    pub mint_authority: Pubkey,
+    pub mint: Pubkey,
+    pub max_supply: u64,
+    pub minted: u64,
+    pub decimals: u8,
+    pub is_paused: bool,
 }
 
 impl TokenInfo {
     pub const LEN: usize = 8 + // discriminator
-        32 + // authority
+        32 + // mint_authority
         32 + // mint
-        8 +  // total_supply
+        8 +  // max_supply
         8 +  // minted
-        1;   // decimals
+        1 +  // decimals
+        1;   // is_paused
 }
 
 #[error_code]
 pub enum TokenError {
-    #[msg("Invalid mint authority")]
-    InvalidMintAuthority,
-    #[msg("Insufficient supply for minting")]
-    InsufficientSupply,
-    #[msg("Invalid amount")]
+    #[msg("Invalid amount - must be greater than 0")]
     InvalidAmount,
+    #[msg("Unauthorized mint authority")]
+    UnauthorizedMintAuthority,
+    #[msg("Exceeds maximum supply")]
+    ExceedsMaxSupply,
+    #[msg("Math overflow in calculation")]
+    MathOverflow,
+    #[msg("Token is paused")]
+    TokenPaused,
+    #[msg("Invalid token account")]
+    InvalidTokenAccount,
+    #[msg("Insufficient balance")]
+    InsufficientBalance,
+    #[msg("Unauthorized admin")]
+    UnauthorizedAdmin,
 }

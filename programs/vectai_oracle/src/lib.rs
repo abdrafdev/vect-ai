@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2};
+use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 
 declare_id!("8FWpTEk2NPut6MrKXiCGVzz9ZY247fcYGdL9TEoXFqzw");
 
@@ -7,32 +7,31 @@ declare_id!("8FWpTEk2NPut6MrKXiCGVzz9ZY247fcYGdL9TEoXFqzw");
 pub mod vectai_oracle {
     use super::*;
 
-    /// Secure price fetch from Pyth with validation
+    /// Secure price fetch with comprehensive validation
     pub fn get_price(ctx: Context<GetPrice>) -> Result<PriceData> {
         let price_update = &ctx.accounts.price_update;
         
-        // Load Pyth price data
+        // ✅ CHECKS: Validate price update data
         let price_update_data = PriceUpdateV2::try_deserialize(
             &mut price_update.data.borrow().as_ref()
         ).map_err(|_| OracleError::InvalidPriceUpdate)?;
 
-        // Get first price feed
         let price_feed = price_update_data
             .price_feeds
             .first()
             .ok_or(OracleError::NoPriceFeedFound)?;
 
-        // Strict staleness check (2 minutes max)
+        // ✅ CHECKS: Strict staleness check (2 minutes max)
         let clock = Clock::get()?;
         let price_age = clock.unix_timestamp - price_feed.publish_time;
         require!(price_age <= 120, OracleError::StalePrice); // 2 minutes max
         require!(price_age >= 0, OracleError::FuturePrice); // No future prices
 
-        // Price bounds validation
+        // ✅ CHECKS: Price bounds validation
         require!(price_feed.price > 0, OracleError::InvalidPrice);
-        require!(price_feed.price < 10_000_000_000, OracleError::PriceTooBig); // Max $10B
+        require!(price_feed.price < 1_000_000_000_000, OracleError::PriceTooBig); // Max $1T
         
-        // Confidence validation (max 5% uncertainty)
+        // ✅ CHECKS: Confidence validation (max 5% uncertainty)
         let confidence_ratio = (price_feed.conf as f64) / (price_feed.price.abs() as f64);
         require!(confidence_ratio <= 0.05, OracleError::LowConfidence);
 
@@ -43,7 +42,7 @@ pub mod vectai_oracle {
             publish_time: price_feed.publish_time,
         };
 
-        msg!("Secure price: {} * 10^{} (±{})", price_data.price, price_data.expo, price_data.conf);
+        msg!("✅ Secure price: {} * 10^{} (±{})", price_data.price, price_data.expo, price_data.conf);
         Ok(price_data)
     }
 
@@ -52,35 +51,29 @@ pub mod vectai_oracle {
         ctx: Context<GetPrice>,
         threshold: i64,
     ) -> Result<bool> {
-        // Validate threshold inputs
+        // ✅ CHECKS: Validate threshold inputs
         require!(threshold > 0, OracleError::InvalidThreshold);
-        require!(threshold < 10_000_000_000, OracleError::ThresholdTooBig);
+        require!(threshold < 1_000_000_000_000, OracleError::ThresholdTooBig);
         
         let price_data = Self::get_price(ctx)?;
         let meets_threshold = price_data.price > threshold;
         
-        msg!(
-            "Secure price {} > threshold {}: {}",
-            price_data.price,
-            threshold,
-            meets_threshold
-        );
-        
+        msg!("✅ Price {} > threshold {} = {}", price_data.price, threshold, meets_threshold);
         Ok(meets_threshold)
     }
 
-    /// Secure trading condition with input validation
+    /// Secure trading condition with comprehensive validation
     pub fn get_trading_condition(
         ctx: Context<GetPrice>,
         short_threshold: i64,
         long_threshold: i64,
     ) -> Result<TradingCondition> {
-        // Validate threshold inputs
+        // ✅ CHECKS: Validate threshold inputs
         require!(short_threshold > 0, OracleError::InvalidThreshold);
         require!(long_threshold > 0, OracleError::InvalidThreshold);
         require!(long_threshold > short_threshold, OracleError::InvalidThresholdOrder);
-        require!(short_threshold < 10_000_000_000, OracleError::ThresholdTooBig);
-        require!(long_threshold < 10_000_000_000, OracleError::ThresholdTooBig);
+        require!(short_threshold < 1_000_000_000_000, OracleError::ThresholdTooBig);
+        require!(long_threshold < 1_000_000_000_000, OracleError::ThresholdTooBig);
         
         let price_data = Self::get_price(ctx)?;
         
@@ -92,13 +85,8 @@ pub mod vectai_oracle {
             TradingCondition::Mid
         };
         
-        msg!(
-            "Secure trading condition: {:?} (Price: {}, Short: {}, Long: {})",
-            condition,
-            price_data.price,
-            short_threshold,
-            long_threshold
-        );
+        msg!("✅ Trading condition: {:?} (Price: {}, Short: {}, Long: {})",
+             condition, price_data.price, short_threshold, long_threshold);
         
         Ok(condition)
     }
@@ -118,7 +106,6 @@ pub struct PriceData {
     pub publish_time: i64,
 }
 
-/// Simple trading conditions from diagram
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub enum TradingCondition {
     Short,  // Price below short threshold
@@ -138,13 +125,13 @@ pub enum OracleError {
     FuturePrice,
     #[msg("Invalid price value")]
     InvalidPrice,
-    #[msg("Price too big (max $10B)")]
+    #[msg("Price too big (max $1T)")]
     PriceTooBig,
     #[msg("Price confidence too low")]
     LowConfidence,
     #[msg("Invalid threshold")]
     InvalidThreshold,
-    #[msg("Threshold too big (max $10B)")]
+    #[msg("Threshold too big (max $1T)")]
     ThresholdTooBig,
     #[msg("Long threshold must be > short threshold")]
     InvalidThresholdOrder,
