@@ -6,11 +6,13 @@ skip-lint = false
 vectai_token = "DfpsT9PAeWbwwfE8EqTDqVUiCrsoHF1fogmPw42eqLPH"
 vectai_oracle = "8FWpTEk2NPut6MrKXiCGVzz9ZY247fcYGdL9TEoXFqzw"
 vectai_trader = "FEmf6TbtffcKVptbshZvCcg3CjQqsWodNwQhpXJff4NP"
+raydium_swapper = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
 
 [programs.devnet]
 vectai_token = "DfpsT9PAeWbwwfE8EqTDqVUiCrsoHF1fogmPw42eqLPH"
 vectai_oracle = "8FWpTEk2NPut6MrKXiCGVzz9ZY247fcYGdL9TEoXFqzw"
 vectai_trader = "FEmf6TbtffcKVptbshZvCcg3CjQqsWodNwQhpXJff4NP"
+raydium_swapper = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
 
 [programs.mainnet]
 vectai_token = "DfpsT9PAeWbwwfE8EqTDqVUiCrsoHF1fogmPw42eqLPH"

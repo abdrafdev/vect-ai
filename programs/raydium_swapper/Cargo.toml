@@ -1,12 +1,13 @@
 [package]
-name = "vectai_oracle"
+name = "raydium-swapper"
 version = "0.1.0"
-description = "VECT.AI Lightweight Pyth Oracle Reader"
+description = "Minimal Raydium swap via CPI (USDC/SOL devnet pool)"
 edition = "2021"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "vectai_oracle"
+name = "raydium_swapper"
 
 [features]
 no-entrypoint = []
@@ -17,3 +18,5 @@ default = []
 
 [dependencies]
 anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+solana-program = "1.18.10"

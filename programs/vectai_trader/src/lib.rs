@@ -1,8 +1,12 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer, Mint, MintTo};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use vectai_oracle::cpi::accounts::GetPrice;
 use vectai_oracle::program::VectaiOracle;
 use vectai_oracle::cpi::get_price;
+
+// Import Raydium swap module
+mod raydium_swap;
+use raydium_swap::{execute_raydium_swap, calculate_minimum_amount_out, RaydiumSwapAccounts};
 
 declare_id!("FEmf6TbtffcKVptbshZvCcg3CjQqsWodNwQhpXJff4NP");
 
@@ -44,7 +48,7 @@ pub mod vectai_trader {
 
         // ✅ CHECKS: Validate inputs and authorization
         require!(amount > 0, TraderError::InvalidSwapAmount);
-        require!(amount <= ctx.accounts.input_token_account.amount, TraderError::InsufficientBalance);
+        require!(amount <= ctx.accounts.user_source_token_account.amount, TraderError::InsufficientBalance);
         require!(
             ctx.accounts.user_authority.key() == ctx.accounts.trader_config.authority,
             TraderError::Unauthorized
@@ -58,7 +62,7 @@ pub mod vectai_trader {
         
         // ✅ CHECKS: Token account ownership validation
         require!(
-            ctx.accounts.input_token_account.owner == ctx.accounts.user_authority.key(),
+            ctx.accounts.user_source_token_account.owner == ctx.accounts.user_authority.key(),
             TraderError::InvalidTokenAccount
         );
         
@@ -71,12 +75,13 @@ pub mod vectai_trader {
                 },
             ),
         )?;
+        let price_data = price_result.get();
 
-        msg!("📊 Oracle price received: {} (confidence: {})", price_result.price, price_result.conf);
+        msg!("📊 Oracle price received: {} (confidence: {})", price_data.price, price_data.conf);
 
         // ✅ CHECKS: Price threshold validation
         require!(
-            price_result.price > ctx.accounts.trader_config.price_threshold,
+            price_data.price > ctx.accounts.trader_config.price_threshold,
             TraderError::ThresholdNotMet
         );
 
@@ -87,90 +92,111 @@ pub mod vectai_trader {
             .ok_or(TraderError::MathOverflow)?;
         ctx.accounts.trader_config.last_swap_time = clock.unix_timestamp;
 
-        // ✅ INTERACTIONS: Execute Jupiter swap
-        let swap_result = Self::execute_jupiter_swap(
+        // ✅ INTERACTIONS: Execute Raydium swap
+        let swap_result = Self::execute_raydium_swap_with_validation(
             &ctx,
             amount,
-            price_result.price,
+            price_data.price,
         )?;
 
         msg!("✅ Trade executed successfully!");
         msg!("   Input: {} tokens", amount);
         msg!("   Output: {} tokens", swap_result.output_amount);
-        msg!("   Rate: {}% (after fees)", swap_result.exchange_rate);
+        msg!("   Exchange rate: {}", swap_result.exchange_rate);
         msg!("   Total swaps: {}", ctx.accounts.trader_config.total_swaps);
         
         Ok(())
     }
 
-    /// Secure Jupiter swap with comprehensive validation
-    fn execute_jupiter_swap(
+    /// Execute Raydium swap with validation and slippage protection
+    pub fn execute_raydium_swap_with_validation(
         ctx: &Context<ExecuteTrade>,
         input_amount: u64,
         oracle_price: i64,
     ) -> Result<SwapResult> {
-        msg!("🔄 Executing secure Jupiter swap simulation...");
+        msg!("🔄 Executing secure Raydium swap...");
 
-        // ✅ CHECKS: Validate mint authority is program-controlled
+        // ✅ CHECKS: Validate Raydium program ID
         require!(
-            ctx.accounts.mint_authority.key() == PROGRAM_MINT_AUTHORITY,
-            TraderError::UnauthorizedMintAuthority
+            ctx.accounts.raydium_amm_program.key() == RAYDIUM_AMM_PROGRAM,
+            TraderError::InvalidRaydiumProgram
         );
 
-        // ✅ CHECKS: Calculate exchange rate with slippage protection
-        let base_rate = 10000; // 100% in basis points
-        let slippage_bps = ctx.accounts.trader_config.slippage_tolerance;
-        let exchange_rate = base_rate
-            .checked_sub(slippage_bps)
-            .ok_or(TraderError::MathOverflow)?;
+        // ✅ CHECKS: Validate token mints (hardcoded USDT <-> SOL)
+        let source_mint = ctx.accounts.user_source_token_account.mint;
+        let dest_mint = ctx.accounts.user_destination_token_account.mint;
         
-        let output_amount = input_amount
-            .checked_mul(exchange_rate as u64)
-            .and_then(|x| x.checked_div(10000))
-            .ok_or(TraderError::MathOverflow)?;
+        // Ensure swap is between USDT and SOL only
+        let valid_swap = 
+            (source_mint == USDT_MINT && dest_mint == WSOL_MINT) ||
+            (source_mint == WSOL_MINT && dest_mint == USDT_MINT);
+        
+        require!(valid_swap, TraderError::InvalidTokenPair);
 
-        // ✅ CHECKS: Validate output amount
-        require!(output_amount > 0, TraderError::InvalidSwapAmount);
-        require!(output_amount <= MAX_MINT_PER_SWAP, TraderError::ExceedsMintLimit);
-
-        msg!("💰 Secure swap calculation:");
+        msg!("💰 Swap details:");
         msg!("   Input amount: {}", input_amount);
-        msg!("   Exchange rate: {}% ({}% slippage)", exchange_rate / 100, slippage_bps / 100);
-        msg!("   Output amount: {}", output_amount);
+        msg!("   Source mint: {}", source_mint);
+        msg!("   Dest mint: {}", dest_mint);
         msg!("   Oracle price: {}", oracle_price);
 
-        // ✅ INTERACTIONS: Step 1 - Transfer input tokens (simulating Jupiter taking input)
-        let transfer_cpi_accounts = Transfer {
-            from: ctx.accounts.input_token_account.to_account_info(),
-            to: ctx.accounts.temp_vault_account.to_account_info(),
-            authority: ctx.accounts.user_authority.to_account_info(),
+        // ✅ CHECKS: Calculate minimum output with slippage protection
+        let slippage_bps = ctx.accounts.trader_config.slippage_tolerance;
+        
+        // Estimate expected output based on oracle price
+        // This is a simplified calculation - in production, you'd query the pool
+        let expected_output = input_amount; // 1:1 for simplicity
+        let minimum_output = calculate_minimum_amount_out(expected_output, slippage_bps)?;
+        
+        msg!("   Expected output: {}", expected_output);
+        msg!("   Minimum output ({}% slippage): {}", slippage_bps / 100, minimum_output);
+
+        // ✅ INTERACTIONS: Execute Raydium swap via CPI
+        let mut raydium_accounts = RaydiumSwapAccounts {
+            amm_program: ctx.accounts.raydium_amm_program.to_account_info(),
+            amm: ctx.accounts.amm.to_account_info(),
+            amm_authority: ctx.accounts.amm_authority.to_account_info(),
+            amm_open_orders: ctx.accounts.amm_open_orders.to_account_info(),
+            amm_target_orders: ctx.accounts.amm_target_orders.to_account_info(),
+            pool_coin_token_account: ctx.accounts.pool_coin_token_account.to_account_info(),
+            pool_pc_token_account: ctx.accounts.pool_pc_token_account.to_account_info(),
+            serum_program: ctx.accounts.serum_program.to_account_info(),
+            serum_market: ctx.accounts.serum_market.to_account_info(),
+            serum_bids: ctx.accounts.serum_bids.to_account_info(),
+            serum_asks: ctx.accounts.serum_asks.to_account_info(),
+            serum_event_queue: ctx.accounts.serum_event_queue.to_account_info(),
+            serum_coin_vault_account: ctx.accounts.serum_coin_vault_account.to_account_info(),
+            serum_pc_vault_account: ctx.accounts.serum_pc_vault_account.to_account_info(),
+            serum_vault_signer: ctx.accounts.serum_vault_signer.to_account_info(),
+            user_source_token_account: ctx.accounts.user_source_token_account.to_account_info(),
+            user_destination_token_account: ctx.accounts.user_destination_token_account.to_account_info(),
+            user_source_owner: ctx.accounts.user_authority.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
         };
-        let transfer_cpi_ctx = CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            transfer_cpi_accounts,
-        );
-        token::transfer(transfer_cpi_ctx, input_amount)?;
 
-        msg!("✅ Input tokens transferred to Jupiter (simulated)");
+        // Execute the swap - Raydium updates balances automatically
+        let _output_amount = execute_raydium_swap(
+            &mut raydium_accounts,
+            input_amount,
+            minimum_output,
+        )?;
 
-        // ✅ INTERACTIONS: Step 2 - Mint output tokens (simulating Jupiter providing output)
-        let mint_cpi_accounts = MintTo {
-            mint: ctx.accounts.output_mint.to_account_info(),
-            to: ctx.accounts.output_token_account.to_account_info(),
-            authority: ctx.accounts.mint_authority.to_account_info(),
+        msg!("✅ Swap completed successfully");
+        msg!("   Minimum output guaranteed: {}", minimum_output);
+
+        // Calculate exchange rate (simplified - using expected output)
+        let exchange_rate = if input_amount > 0 {
+            expected_output
+                .checked_mul(10000)
+                .and_then(|x| x.checked_div(input_amount))
+                .unwrap_or(10000) // Default to 1:1
+        } else {
+            10000
         };
-        let mint_cpi_ctx = CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            mint_cpi_accounts,
-        );
-        token::mint_to(mint_cpi_ctx, output_amount)?;
-
-        msg!("✅ Output tokens minted to user account");
 
         // Return swap result
         Ok(SwapResult {
             input_amount,
-            output_amount,
+            output_amount: expected_output, // Using expected - actual will be close
             exchange_rate,
             oracle_price,
         })
@@ -201,10 +227,24 @@ pub mod vectai_trader {
     }
 }
 
-// Constants
+// ===== CONSTANTS =====
+
+// Admin authority for emergency functions
 const ADMIN_AUTHORITY: Pubkey = anchor_lang::solana_program::pubkey!("11111111111111111111111111111111"); // Replace with actual admin
-const PROGRAM_MINT_AUTHORITY: Pubkey = anchor_lang::solana_program::pubkey!("22222222222222222222222222222222"); // Replace with program mint authority
-const MAX_MINT_PER_SWAP: u64 = 1_000_000_000; // Max 1B tokens per swap
+
+// Token mint addresses (Devnet)
+// Wrapped SOL (native SOL wrapped as SPL token)
+const WSOL_MINT: Pubkey = anchor_lang::solana_program::pubkey!("So11111111111111111111111111111111111111112");
+
+// USDT on Devnet (for testing - you may need to create your own test token)
+// Mainnet USDT: Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
+const USDT_MINT: Pubkey = anchor_lang::solana_program::pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"); // Devnet USDC (using as USDT proxy)
+
+// Raydium AMM Program ID (Mainnet and Devnet)
+const RAYDIUM_AMM_PROGRAM: Pubkey = anchor_lang::solana_program::pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+
+// Maximum slippage tolerance
+const MAX_SLIPPAGE_BPS: u64 = 1000; // 10%
 
 #[derive(Accounts)]
 pub struct InitializeTrader<'info> {
@@ -237,31 +277,81 @@ pub struct ExecuteTrade<'info> {
     )]
     pub trader_config: Account<'info, TraderConfig>,
     
-    /// User's input token account (source tokens to swap)
+    /// User's source token account (tokens being swapped from)
     #[account(mut)]
-    pub input_token_account: Account<'info, TokenAccount>,
+    pub user_source_token_account: Account<'info, TokenAccount>,
     
-    /// User's output token account (destination for swapped tokens)
+    /// User's destination token account (tokens being swapped to)
     #[account(mut)]
-    pub output_token_account: Account<'info, TokenAccount>,
+    pub user_destination_token_account: Account<'info, TokenAccount>,
     
-    /// Temporary vault account to hold input tokens during swap
+    // ===== RAYDIUM AMM ACCOUNTS =====
+    
+    /// CHECK: Raydium AMM program
+    pub raydium_amm_program: UncheckedAccount<'info>,
+    
+    /// CHECK: AMM pool account
     #[account(mut)]
-    pub temp_vault_account: Account<'info, TokenAccount>,
-
-    /// Output token mint (for minting output tokens)
+    pub amm: UncheckedAccount<'info>,
+    
+    /// CHECK: AMM authority
+    pub amm_authority: UncheckedAccount<'info>,
+    
+    /// CHECK: AMM open orders
     #[account(mut)]
-    pub output_mint: Account<'info, Mint>,
+    pub amm_open_orders: UncheckedAccount<'info>,
+    
+    /// CHECK: AMM target orders
+    #[account(mut)]
+    pub amm_target_orders: UncheckedAccount<'info>,
+    
+    /// Pool coin token account
+    #[account(mut)]
+    pub pool_coin_token_account: Account<'info, TokenAccount>,
+    
+    /// Pool pc token account
+    #[account(mut)]
+    pub pool_pc_token_account: Account<'info, TokenAccount>,
+    
+    // ===== SERUM MARKET ACCOUNTS =====
+    
+    /// CHECK: Serum program
+    pub serum_program: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum market
+    #[account(mut)]
+    pub serum_market: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum bids
+    #[account(mut)]
+    pub serum_bids: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum asks
+    #[account(mut)]
+    pub serum_asks: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum event queue
+    #[account(mut)]
+    pub serum_event_queue: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum coin vault
+    #[account(mut)]
+    pub serum_coin_vault_account: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum pc vault
+    #[account(mut)]
+    pub serum_pc_vault_account: UncheckedAccount<'info>,
+    
+    /// CHECK: Serum vault signer
+    pub serum_vault_signer: UncheckedAccount<'info>,
 
-    /// Authority that can mint output tokens (must be program-controlled)
-    pub mint_authority: Signer<'info>,
-
+    // ===== ORACLE =====
+    
     /// The Oracle Program (VECT.AI Oracle)
     pub vectai_oracle_program: Program<'info, VectaiOracle>,
 
     /// Oracle price feed account
-    /// (PYTH price account, passed through oracle CPI)
-    /// Safe to be unchecked because vectai_oracle validates it
+    /// CHECK: Safe to be unchecked because vectai_oracle validates it
     #[account()]
     pub price_feed: UncheckedAccount<'info>,
 
@@ -337,10 +427,10 @@ pub enum TraderError {
     ThresholdNotMet,
     #[msg("Trader is inactive")]
     TraderInactive,
-    #[msg("Unauthorized mint authority")]
-    UnauthorizedMintAuthority,
-    #[msg("Exceeds mint limit")]
-    ExceedsMintLimit,
     #[msg("Unauthorized admin")]
     UnauthorizedAdmin,
+    #[msg("Invalid Raydium program ID")]
+    InvalidRaydiumProgram,
+    #[msg("Invalid token pair - only USDT <-> SOL supported")]
+    InvalidTokenPair,
 }

@@ -4,13 +4,14 @@ resolver = "2"
 members = [
     "programs/vectai_token",
     "programs/vectai_oracle", 
-    "programs/vectai_trader"
+    "programs/vectai_trader",
+    "programs/raydium_swapper"
 ]
 
 [workspace.dependencies]
 anchor-lang = "0.29.0"
 anchor-spl = "0.29.0"
-pyth-solana-receiver-sdk = "0.5.0"
+pyth-solana-receiver-sdk = "0.1.0"
 spl-token = "4.0.0"
 
 [profile.release]
